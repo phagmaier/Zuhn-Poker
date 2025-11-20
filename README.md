@@ -93,7 +93,3 @@ zig build
 This project is MIT-licensed. Feel free to explore, modify, and build upon it.
 
 ---
-
-If you want, I can also write a **short “TL;DR” explanation section** for the README that explains *why you deliberately over-engineered Kuhn Poker* in just 3–4 sentences — it’s nice to have for GitHub readers who just glance at it.
-
-Do you want me to add that?
