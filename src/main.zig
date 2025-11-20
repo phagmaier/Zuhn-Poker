@@ -5,7 +5,7 @@ const Allocator = std.mem.Allocator;
 const CARDS = "KQJ";
 const MAXLEN = 3;
 
-const PLAYER = enum { FTA, STA, BOTH };
+//const PLAYER = enum { FTA, STA, BOTH };
 
 pub const Node = struct {
     regrets: [3][2]f32,
@@ -27,33 +27,6 @@ pub const Node = struct {
             return false;
         }
         return ((state[size - 1] == state[size - 2]) or (state[size - 1] == 'b' and state[size - 2] == 'c'));
-    }
-
-    pub fn get_result(state: [MAXLEN]u8, size: u8, p1: usize, p2: usize, pot: f32) f32 {
-        //means there is a showdown
-        if (state[size - 1] == state[size - 2]) {
-            return if (p1 > p2) pot else -pot;
-        }
-        //no showdown p1 only loses when size 3
-        return if (size == 3) -pot else pot;
-    }
-
-    pub fn get_prct(self: *Node) [3][2]f32 {
-        var strats: [3][2]f32 = undefined;
-        for (0..3) |card| {
-            strats[card][0], strats[card][1] = _get_prct(self.regrets[card][0], self.regrets[card][1]);
-        }
-        return strats;
-    }
-
-    fn _get_prct(c: f32, b: f32) struct { f32, f32 } {
-        const check: f32 = if (c >= 0) c else 0.0;
-        const bet: f32 = if (b >= 0) b else 0.0;
-        const total = c + b;
-        if (total == 0) {
-            return .{ 0.5, 0.5 };
-        }
-        return if (total > 0) .{ check / total, bet / total } else .{ 0.5, 0.5 };
     }
 
     fn build(self: *Node, mem: Allocator, state: *[MAXLEN]u8, size: u8) !void {
@@ -93,6 +66,24 @@ pub const Node = struct {
         }
     }
 
+    pub fn get_prct(self: *Node) [3][2]f32 {
+        var strats: [3][2]f32 = undefined;
+        for (0..3) |card| {
+            strats[card][0], strats[card][1] = _get_prct(self.regrets[card][0], self.regrets[card][1]);
+        }
+        return strats;
+    }
+
+    fn _get_prct(c: f32, b: f32) struct { f32, f32 } {
+        const check: f32 = if (c >= 0) c else 0.0;
+        const bet: f32 = if (b >= 0) b else 0.0;
+        const total = c + b;
+        if (total == 0) {
+            return .{ 0.5, 0.5 };
+        }
+        return if (total > 0) .{ check / total, bet / total } else .{ 0.5, 0.5 };
+    }
+
     pub fn print_nodes(self: *Node, str: *[MAXLEN]u8, size: u8, right: bool) void {
         if (size == 0) {
             print("\tHEAD NODE\n", .{});
@@ -113,20 +104,75 @@ pub const Node = struct {
         }
     }
 
-    pub fn cfrm(self: *Node) void {
-        var p1: [3]f32 = undefined;
-        var p2: [3]f32 = undefined;
-        for (0..3) |i| {
-            p1[i] = 1.0;
-            p2[i] = 1.0;
+    fn update_reach(reach: [2][3]f32, prcts: [2][3]f32) [2][3]f32 {
+        var results = std.mem.zeroes([2][3]f32);
+        for (0..2) |i| {
+            for (0..3) |j| {
+                results[i][j] = reach[i][j] * prcts[i][j];
+            }
         }
-        var state = std.mem.zeroes([MAXLEN]u8);
-        try self._cfrm(&p1, &p2, &state, 0);
+        return results;
     }
 
-    pub fn get_term(self: *Node, p1: [3]f32, p2: [3]f32, state: *[MAXLEN]u8, size: u8) void {}
+    fn handle_showdown(pot: f32) [3][3]f32 {
+        var results: [3][3]f32 = undefined;
+        for (0..3) |i| {
+            for (0..3) |j| {
+                if (i != j) {
+                    results[i][j] = if (i > j) pot else -pot;
+                }
+            }
+        }
+        return results;
+    }
 
-    pub fn _cfrm(self: *Node, prct: *[3][2]f32, state: *[MAXLEN]u8, size: u8) void {}
+    fn handle_fold(pot: f32, size: u8) [3][3]f32 {
+        const winnings = if (size == 3) -pot else pot;
+        var results: [3][3]f32 = undefined;
+        for (0..3) |i| {
+            for (0..3) |j| {
+                if (i != j) {
+                    results[i][j] = winnings;
+                }
+            }
+        }
+        return results;
+    }
+
+    fn handleTerm(state: [MAXLEN]u8, size: u8) [3][3]f32 {
+        const showdown = state[size - 1] == state[size - 2];
+        const pot = if (size == 3) 2 else 1;
+        return if (showdown) handle_showdown(pot) else handle_fold(pot, size);
+    }
+
+    fn update_regret(self:*Node, reach:check:[3][3]f32, bet:[3][3]f32,)
+
+    pub fn _cfrm(self: *Node, reach: [2][3]f32, state: *[MAXLEN]u8, size: u8) [3][3]f32 {
+        const curStrat = self.get_prct();
+        const curReach = update_reach(reach, curStrat);
+        var left: [3][3]f32 = undefined;
+        var right: [3][3]f32 = undefined;
+        if (self.l) |l| {
+            state[size] = 'c';
+            left = l._cfrm(curReach, state, size + 1);
+        }
+        if (self.r) |r| {
+            state[size] = 'b';
+            right = r._cfrm(curReach, state, size + 1);
+        }
+        if (self.l == null and self.r == null) {
+            state[size] = 'c';
+            left = self.handleTerm(state, size + 1);
+            state[size] = 'b';
+            right = self.handleTerm(state, size + 1);
+        }
+    }
+
+    pub fn cfrm(self: *Node) void {
+        const reach = std.mem.zeroes([2][3]f32);
+        var state = std.mem.zeroes([MAXLEN]u8);
+        _ = self._cfrm(reach, &state, 0);
+    }
 };
 
 pub fn main() !void {
