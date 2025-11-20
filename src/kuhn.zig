@@ -207,12 +207,120 @@ pub const Node = struct {
         return result;
     }
 
-    pub fn printStrategy(self: *Node, name: []const u8) void {
-        const strat = self.getAverageStrategy();
-        print("{s}:\n", .{name});
-        const cards = [_]u8{ 'J', 'Q', 'K' };
-        for (0..3) |i| {
-            print("  {c}: check/fold={d:.3}, bet/call={d:.3}\n", .{ cards[i], strat[0][i], strat[1][i] });
+    fn computeEVUtil(self: *Node, state: *[SSIZE]u8, size: u8) [3][3]f32 {
+        const hero: usize = size % 2;
+        const strat = self.getAverageStrategy(); // Use average strategy, not current regrets
+        var utils: [2][3][3]f32 = undefined;
+
+        state[size] = 'c';
+        if (self.l) |l| {
+            utils[0] = l.computeEVUtil(state, size + 1);
+        } else {
+            utils[0] = getTermUtil(state.*, size + 1);
         }
+
+        state[size] = 'b';
+        if (self.r) |r| {
+            utils[1] = r.computeEVUtil(state, size + 1);
+        } else {
+            utils[1] = getTermUtil(state.*, size + 1);
+        }
+
+        return updateUtil(utils, hero, strat);
+    }
+
+    pub fn computeEV(self: *Node) f32 {
+        var state = std.mem.zeroes([SSIZE]u8);
+        const util_matrix = self.computeEVUtil(&state, 0);
+
+        // Average over all card combinations
+        var ev: f32 = 0;
+        var count: f32 = 0;
+        for (0..3) |p1| {
+            for (0..3) |p2| {
+                if (p1 != p2) {
+                    ev += util_matrix[p1][p2];
+                    count += 1;
+                }
+            }
+        }
+        return ev / count;
+    }
+
+    pub fn printResults(self: *Node, iterations: usize) void {
+        print("\n", .{});
+        print("=" ** 70, .{});
+        print("\n", .{});
+        print("  KUHN POKER - NASH EQUILIBRIUM SOLUTION\n", .{});
+        print("  Iterations: {d}\n", .{iterations});
+        print("=" ** 70, .{});
+        print("\n\n", .{});
+
+        // Expected values
+        const ev = self.computeEV();
+        print("EXPECTED VALUES (per hand):\n", .{});
+        print("  Player 1 (P1): {d: >7.4}\n", .{ev});
+        print("  Player 2 (P2): {d: >7.4}\n", .{-ev});
+        print("  Theoretical:   -0.0556 (= -1/18)\n\n", .{});
+
+        // P1 initial strategy
+        print("PLAYER 1 - INITIAL ACTION:\n", .{});
+        self.printStrategyNode("  ", true);
+
+        // P2 after check
+        if (self.l) |l| {
+            print("\nPLAYER 2 - AFTER P1 CHECKS:\n", .{});
+            l.printStrategyNode("  ", false);
+        }
+
+        // P2 after bet
+        if (self.r) |r| {
+            print("\nPLAYER 2 - AFTER P1 BETS:\n", .{});
+            r.printStrategyNode("  ", false);
+        }
+
+        // P1 after check-bet
+        if (self.l) |l| {
+            if (l.r) |lr| {
+                print("\nPLAYER 1 - AFTER CHECK-BET:\n", .{});
+                lr.printStrategyNode("  ", true);
+            }
+        }
+
+        print("\n", .{});
+        print("-" ** 70, .{});
+        print("\n", .{});
+        print("NASH EQUILIBRIUM PROPERTIES:\n", .{});
+        print("  • K should bet ~3x as often as J (makes P2's Q indifferent)\n", .{});
+        print("  • P2's K always bets/calls (strongest hand)\n", .{});
+        print("  • P2's J bluffs ~33%% after check, always folds to bet\n", .{});
+        print("  • P2's Q is indifferent, mixes between actions\n", .{});
+        print("  • Game slightly favors P2 (acts last with information)\n", .{});
+        print("=" ** 70, .{});
+        print("\n\n", .{});
+    }
+
+    fn printStrategyNode(self: *Node, indent: []const u8, is_p1: bool) void {
+        const strat = self.getAverageStrategy();
+        const cards = [_]u8{ 'J', 'Q', 'K' };
+        const actions = if (is_p1)
+            [2][]const u8{ "Check", "Bet  " }
+        else
+            [2][]const u8{ "Check/Fold", "Bet/Call  " };
+
+        print("{s}┌────────────────────────────────────┐\n", .{indent});
+        print("{s}│  Card  │  {s}  │  {s}  │\n", .{ indent, actions[0], actions[1] });
+        print("{s}├────────┼────────────┼────────────┤\n", .{indent});
+
+        for (0..3) |i| {
+            print("{s}│   {c}    │   {d: >5.1}%   │   {d: >5.1}%   │\n", .{
+                indent,
+                cards[i],
+                strat[0][i] * 100,
+                strat[1][i] * 100,
+            });
+        }
+
+        print("{s}└────────┴────────────┴────────────┘\n", .{indent});
     }
 };
