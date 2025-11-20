@@ -23,10 +23,10 @@ pub const Node = struct {
     }
 
     pub fn isTerm(state: [MAXLEN]u8, size: u8) bool {
-        if (size < 2) {
-            return false;
-        }
-        return ((state[size - 1] == state[size - 2]) or (state[size - 1] == 'b' and state[size - 2] == 'c'));
+        if (size < 2) return false;
+        if (size >= 3) return true;
+        // size == 2: terminal unless it's check-bet
+        return !(state[0] == 'c' and state[1] == 'b');
     }
 
     fn build(self: *Node, mem: Allocator, state: *[MAXLEN]u8, size: u8) !void {
@@ -66,6 +66,15 @@ pub const Node = struct {
         }
     }
 
+    pub fn print_strategy(self: *Node, name: []const u8) void {
+        const strat = self.get_average_strategy();
+        print("{s}:\n", .{name});
+        const cards = [_]u8{ 'K', 'Q', 'J' };
+        for (0..3) |i| {
+            print("  {c}: check={d:.3}, bet={d:.3}\n", .{ cards[i], strat[i][0], strat[i][1] });
+        }
+    }
+
     pub fn get_prct(self: *Node) [3][2]f32 {
         var strats: [3][2]f32 = undefined;
         for (0..3) |card| {
@@ -77,7 +86,7 @@ pub const Node = struct {
     fn _get_prct(c: f32, b: f32) struct { f32, f32 } {
         const check: f32 = if (c >= 0) c else 0.0;
         const bet: f32 = if (b >= 0) b else 0.0;
-        const total = c + b;
+        const total = check + bet;
         if (total == 0) {
             return .{ 0.5, 0.5 };
         }
@@ -119,7 +128,7 @@ pub const Node = struct {
         for (0..3) |i| {
             for (0..3) |j| {
                 if (i != j) {
-                    results[i][j] = if (i > j) pot else -pot;
+                    results[i][j] = if (i < j) pot else -pot;
                 }
             }
         }
@@ -141,37 +150,153 @@ pub const Node = struct {
 
     fn handleTerm(state: [MAXLEN]u8, size: u8) [3][3]f32 {
         const showdown = state[size - 1] == state[size - 2];
-        const pot = if (size == 3) 2 else 1;
-        return if (showdown) handle_showdown(pot) else handle_fold(pot, size);
+
+        var pot: f32 = 1;
+        for (0..size) |i| {
+            if (state[i] == 'b') pot += 1;
+        }
+
+        if (showdown) {
+            return handle_showdown(pot);
+        } else {
+            const p1_wins = (size == 2);
+            var results: [3][3]f32 = undefined;
+            const winnings: f32 = if (p1_wins) 1 else -1;
+            for (0..3) |i| {
+                for (0..3) |j| {
+                    if (i != j) {
+                        results[i][j] = winnings;
+                    }
+                }
+            }
+            return results;
+        }
     }
 
-    fn update_regret(self:*Node, reach:check:[3][3]f32, bet:[3][3]f32,)
+    fn update_sums(self: *Node, reach: [2][3]f32, probs: [3][2]f32, p1: bool) void {
+        const player_idx: usize = if (p1) 0 else 1;
+
+        for (0..3) |card| {
+            // Weight by own reach probability
+            const weight = reach[player_idx][card];
+            self.sums[card][0] += weight * probs[card][0];
+            self.sums[card][1] += weight * probs[card][1];
+        }
+    }
+
+    fn update_regret(self: *Node, reach: [2][3]f32, check: [3][3]f32, bet: [3][3]f32, probs: [3][2]f32, p1: bool) void {
+        const opp_idx: usize = if (p1) 1 else 0;
+
+        for (0..3) |card| {
+            var c_ev: f32 = 0;
+            var b_ev: f32 = 0;
+            var node_ev: f32 = 0;
+
+            for (0..3) |opp_card| {
+                if (card == opp_card) continue;
+
+                const weight = reach[opp_idx][opp_card];
+
+                // Utility is always [p1_card][p2_card]
+                var c_util: f32 = undefined;
+                var b_util: f32 = undefined;
+
+                if (p1) {
+                    c_util = check[card][opp_card];
+                    b_util = bet[card][opp_card];
+                } else {
+                    // P2 acting: card is p2's card, opp_card is p1's
+                    // Negate because P2 wants to minimize P1's utility
+                    c_util = -check[opp_card][card];
+                    b_util = -bet[opp_card][card];
+                }
+
+                c_ev += weight * c_util;
+                b_ev += weight * b_util;
+                node_ev += weight * (probs[card][0] * c_util + probs[card][1] * b_util);
+            }
+
+            self.regrets[card][0] += c_ev - node_ev;
+            self.regrets[card][1] += b_ev - node_ev;
+        }
+    }
+
+    pub fn get_average_strategy(self: *Node) [3][2]f32 {
+        var strats: [3][2]f32 = undefined;
+        for (0..3) |card| {
+            const total = self.sums[card][0] + self.sums[card][1];
+            if (total > 0) {
+                strats[card][0] = self.sums[card][0] / total;
+                strats[card][1] = self.sums[card][1] / total;
+            } else {
+                strats[card][0] = 0.5;
+                strats[card][1] = 0.5;
+            }
+        }
+        return strats;
+    }
 
     pub fn _cfrm(self: *Node, reach: [2][3]f32, state: *[MAXLEN]u8, size: u8) [3][3]f32 {
+        const p1 = (size % 2) == 0;
+        const player: usize = if (p1) 0 else 1;
         const curStrat = self.get_prct();
-        const curReach = update_reach(reach, curStrat);
+
         var left: [3][3]f32 = undefined;
         var right: [3][3]f32 = undefined;
+
+        // Compute reach for each action
+        var check_reach = reach;
+        var bet_reach = reach;
+        for (0..3) |card| {
+            check_reach[player][card] = reach[player][card] * curStrat[card][0];
+            bet_reach[player][card] = reach[player][card] * curStrat[card][1];
+        }
+
+        // Get utilities for each action
         if (self.l) |l| {
             state[size] = 'c';
-            left = l._cfrm(curReach, state, size + 1);
+            left = l._cfrm(check_reach, state, size + 1);
         }
         if (self.r) |r| {
             state[size] = 'b';
-            right = r._cfrm(curReach, state, size + 1);
+            right = r._cfrm(bet_reach, state, size + 1);
         }
         if (self.l == null and self.r == null) {
             state[size] = 'c';
-            left = self.handleTerm(state, size + 1);
+            left = handleTerm(state.*, size + 1);
             state[size] = 'b';
-            right = self.handleTerm(state, size + 1);
+            right = handleTerm(state.*, size + 1);
         }
+
+        // Update regrets and strategy sums
+        self.update_regret(reach, left, right, curStrat, p1);
+        self.update_sums(reach, curStrat, p1);
+
+        // Compute and return node values
+        var result: [3][3]f32 = undefined;
+        for (0..3) |p1_card| {
+            for (0..3) |p2_card| {
+                if (p1_card == p2_card) {
+                    result[p1_card][p2_card] = 0;
+                    continue;
+                }
+                if (p1) {
+                    result[p1_card][p2_card] = curStrat[p1_card][0] * left[p1_card][p2_card] + curStrat[p1_card][1] * right[p1_card][p2_card];
+                } else {
+                    result[p1_card][p2_card] = curStrat[p2_card][0] * left[p1_card][p2_card] + curStrat[p2_card][1] * right[p1_card][p2_card];
+                }
+            }
+        }
+
+        return result;
     }
 
-    pub fn cfrm(self: *Node) void {
-        const reach = std.mem.zeroes([2][3]f32);
-        var state = std.mem.zeroes([MAXLEN]u8);
-        _ = self._cfrm(reach, &state, 0);
+    pub fn cfrm(self: *Node, iterations: usize) void {
+        const reach: [2][3]f32 = .{ .{ 1, 1, 1 }, .{ 1, 1, 1 } };
+        for (0..iterations) |_| {
+            var state = std.mem.zeroes([MAXLEN]u8);
+            _ = self._cfrm(reach, &state, 0);
+        }
     }
 };
 
@@ -184,7 +309,16 @@ pub fn main() !void {
     defer _ = da.deinit();
     var tree = try Node.make_tree(mem);
     defer tree.deinit(mem);
-    var str: [MAXLEN]u8 = std.mem.zeroes([MAXLEN]u8);
-    //tree.cfrm();
-    tree.print_nodes(&str, 0, false);
+    tree.cfrm(1000);
+
+    tree.print_strategy("P1 initial");
+
+    // Print P2's decisions
+    if (tree.l) |l| l.print_strategy("P2 after check");
+    if (tree.r) |r| r.print_strategy("P2 after bet");
+
+    // Print P1's second decision (after check-bet)
+    if (tree.l) |l| {
+        if (l.r) |lr| lr.print_strategy("P1 after check-bet");
+    }
 }
